@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#0B0B10"/>
+  <!-- a tall condensed "1" -->
+  <path d="M226 92h86v250h-76V178l-44 22v-66z" fill="#FFB627"/>
+  <!-- the eight counts, the first one lit -->
+  <g transform="translate(76 372)">
+    <rect x="0" y="0" width="34" height="48" rx="6" fill="#FFB627"/>
+    <rect x="46" y="0" width="34" height="48" rx="6" fill="#1E1E29"/>
+    <rect x="92" y="0" width="34" height="48" rx="6" fill="#1E1E29"/>
+    <rect x="138" y="0" width="34" height="48" rx="6" fill="#1E1E29"/>
+    <rect x="184" y="0" width="34" height="48" rx="6" fill="#1E1E29"/>
+    <rect x="230" y="0" width="34" height="48" rx="6" fill="#1E1E29"/>
+    <rect x="276" y="0" width="34" height="48" rx="6" fill="#1E1E29"/>
+    <rect x="322" y="0" width="34" height="48" rx="6" fill="#1E1E29"/>
+  </g>
+</svg>
