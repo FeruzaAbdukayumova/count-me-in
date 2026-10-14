@@ -24,6 +24,8 @@ export function SettingsSheet(p: Props) {
   const engine = useEngine()
   const { options, grid, mode } = useEngineState()
   const isFile = mode === 'file'
+  // while listening, the microphone sets the tempo and this song isn't kept, so those controls go
+  const isListen = mode === 'listen'
 
   return (
     <div className="sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -43,7 +45,7 @@ export function SettingsSheet(p: Props) {
         />
         <Toggle
           label="Tick on every count"
-          note="A short click, louder on the 1."
+          note={isListen ? 'A short click, louder on the 1. Off while listening: the microphone hears it too.' : 'A short click, louder on the 1.'}
           checked={options.click}
           onChange={(v) => engine.setOption('click', v)}
         />
@@ -129,6 +131,8 @@ export function SettingsSheet(p: Props) {
           onDown={() => engine.setOffset(grid.offsetMs - 10)}
           onUp={() => engine.setOffset(grid.offsetMs + 10)}
         />
+        {!isListen && (
+          <>
         <Stepper
           label="How fast the song is"
           note="Beats per minute. Only change this if the numbers run away from the music."
@@ -149,7 +153,11 @@ export function SettingsSheet(p: Props) {
         <button className="txtbtn self-start" onClick={p.onRetap}>
           Tap the beat out again
         </button>
+          </>
+        )}
 
+        {!isListen && (
+          <>
         <div className="grouplab">This song</div>
         <label className="opt">
           <span className="lbl">
@@ -168,6 +176,8 @@ export function SettingsSheet(p: Props) {
             onChange={(e) => p.onName(e.target.value)}
           />
         </label>
+          </>
+        )}
 
         <div className="grouplab">Start over</div>
         <button className="txtbtn self-start" onClick={p.onNewSong}>

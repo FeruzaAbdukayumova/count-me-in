@@ -15,8 +15,11 @@ import {
 } from './grid'
 import { playTick, speakCount, stopSpeaking, unlockSpeech, type TickKind } from './sounds'
 
-/** 'file': we play the song ourselves. 'tap': the song plays elsewhere and we only keep time. */
-export type Mode = 'tap' | 'file'
+/**
+ * 'file': we play the song ourselves. 'tap': the song plays elsewhere and we only keep time.
+ * 'listen': the song plays elsewhere and the microphone keeps us in time with it.
+ */
+export type Mode = 'tap' | 'file' | 'listen'
 
 export interface Options {
   click: boolean
@@ -75,6 +78,10 @@ export class CountEngine {
 
   private tapTimes: number[] = []
   private nextBeat: number | null = null
+  /** When the last tick was scheduled, so moving the grid never schedules the same beat twice. */
+  private lastTick = -Infinity
+  /** The click setting from before listening, which turns the click off. */
+  private clickBeforeListen: boolean | null = null
   private timer: ReturnType<typeof setInterval> | null = null
 
   // ---------- store ----------
@@ -125,6 +132,7 @@ export class CountEngine {
   // ---------- loading ----------
 
   loadFile(buffer: AudioBuffer, analysis: Analysis, saved?: Partial<Grid>) {
+    this.restoreClick()
     this.stop()
     this.buffer = buffer
     this.pausePos = 0
@@ -143,6 +151,7 @@ export class CountEngine {
   }
 
   useTapMode(saved?: Partial<Grid>) {
+    this.restoreClick()
     this.stop()
     this.buffer = null
     this.tapTimes = []
@@ -156,6 +165,38 @@ export class CountEngine {
     })
   }
 
+  /**
+   * Counts along with music the microphone hears. The count starts once `follow` is first
+   * called. The click starts off, because the microphone would hear it and take it for a beat.
+   */
+  useListenMode() {
+    this.stop()
+    this.buffer = null
+    this.tapTimes = []
+    if (this.clickBeforeListen === null) this.clickBeforeListen = this.state.options.click
+    this.set({
+      mode: 'listen',
+      duration: 0,
+      analysis: null,
+      taps: 0,
+      grid: { ...this.state.grid, anchor: 0 },
+      options: { ...this.state.options, rate: 1, click: false },
+    })
+  }
+
+  /** The microphone found (or corrected) the beat. */
+  follow(bpm: number, anchor: number) {
+    if (this.state.mode !== 'listen') return
+    this.setGrid({ bpm: clampBpm(bpm), anchor })
+    if (!this.state.running) this.setRunning(true)
+  }
+
+  private restoreClick() {
+    if (this.clickBeforeListen === null) return
+    this.set({ options: { ...this.state.options, click: this.clickBeforeListen } })
+    this.clickBeforeListen = null
+  }
+
   // ---------- transport ----------
 
   toggle() {
@@ -167,7 +208,7 @@ export class CountEngine {
   start() {
     const ctx = this.audio()
     const { mode, grid, options } = this.state
-    if (mode === 'tap') {
+    if (mode !== 'file') {
       // the music kept playing while we were stopped, so the grid carries on from the same
       // anchor rather than restarting wherever the button was pressed
       if (!this.tapTimes.length && !grid.anchor) this.setGrid({ anchor: ctx.currentTime - grid.offsetMs / 1000 })
@@ -230,6 +271,7 @@ export class CountEngine {
       stopSpeaking()
     }
     this.nextBeat = null
+    this.lastTick = -Infinity
     this.set({ running: on })
   }
 
@@ -246,7 +288,10 @@ export class CountEngine {
     for (let guard = 0; guard < 64; guard++) {
       const t = this.clockAt(anchor + this.nextBeat * beat)
       if (t > ctx.currentTime + LOOKAHEAD) break
-      if (t >= ctx.currentTime - 0.02) this.sound(this.nextBeat, t)
+      if (t >= ctx.currentTime - 0.02 && t > this.lastTick + beat * 0.5) {
+        this.sound(this.nextBeat, t)
+        this.lastTick = t
+      }
       this.nextBeat++
     }
   }
@@ -285,7 +330,7 @@ export class CountEngine {
     this.tapTimes = []
     this.set({ taps: 0 })
     this.setGrid({ bpm: clampBpm(bpm), anchor })
-    if (!this.state.running && this.state.mode === 'tap') this.setRunning(true)
+    if (!this.state.running && this.state.mode !== 'file') this.setRunning(true)
     return true
   }
 
@@ -297,7 +342,7 @@ export class CountEngine {
   /** "It's off — tap on the 1": the moment this is called becomes a 1. */
   markOne() {
     const ctx = this.audio()
-    if (this.state.mode === 'tap' && !this.state.running) {
+    if (this.state.mode !== 'file' && !this.state.running) {
       this.setGrid({ anchor: ctx.currentTime })
       this.setRunning(true)
     } else {

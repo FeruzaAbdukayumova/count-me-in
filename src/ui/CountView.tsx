@@ -1,10 +1,11 @@
 import { useEffect, useRef } from 'react'
-import { CYCLE, beatIndexAt, countOf, cycleProgress, isFocused } from '../engine/grid'
+import { CYCLE, beatIndexAt, beatLength, countOf, cycleProgress, effectiveAnchor, isFocused } from '../engine/grid'
+import type { ListenState } from '../listen/Listener'
 import { DrumLane } from './DrumLane'
 import { useAnimationFrame, useEngine, useEngineState } from './hooks'
 import { SongStrip } from './SongStrip'
 
-export type HintKey = 'ready' | 'placeone' | 'fixed' | 'sounds' | 'onlyone'
+export type HintKey = 'ready' | 'placeone' | 'fixed' | 'sounds' | 'onlyone' | 'listening'
 
 const HINTS: Record<HintKey, React.ReactNode> = {
   ready: (
@@ -23,6 +24,12 @@ const HINTS: Record<HintKey, React.ReactNode> = {
       Now <b>1</b> is where you said it was. Nod on every 1 and let the rest go past.
     </>
   ),
+  listening: (
+    <>
+      I've got the beat and I'll hold it. If the <b>1</b> feels wrong, press the button below when the music starts
+      over.
+    </>
+  ),
   sounds: <>A block crossing the line is the sound you hear right then.</>,
   onlyone: (
     <>
@@ -35,16 +42,19 @@ interface Props {
   hint: HintKey
   showDrums: boolean
   showWhole: boolean
+  listen: ListenState
   onMarkOne: () => void
+  onStopListening: () => void
+  onFindAgain: () => void
 }
 
-export function CountView({ hint, showDrums, showWhole, onMarkOne }: Props) {
+export function CountView({ hint, showDrums, showWhole, listen, onMarkOne, onStopListening, onFindAgain }: Props) {
   const engine = useEngine()
   const { running, mode, options } = useEngineState()
   const numRef = useRef<HTMLDivElement>(null)
   const boxesRef = useRef<HTMLDivElement>(null)
   const barRef = useRef<HTMLElement>(null)
-  const last = useRef<number | null>(null)
+  const last = useRef<{ start: number; count: number } | null>(null)
 
   // Runs every frame, so it writes to the DOM directly instead of going through React state.
   useAnimationFrame(() => {
@@ -53,8 +63,14 @@ export function CountView({ hint, showDrums, showWhole, onMarkOne }: Props) {
     const beat = running ? beatIndexAt(grid, p) : 0
     const count = countOf(beat)
     const num = numRef.current
-    if (num && beat !== last.current) {
-      last.current = beat
+    // a beat is known by when it started, not its index: the microphone keeps re-basing the
+    // grid, which renumbers beats without moving them, and a nudge of a few ms across a
+    // beat's start shouldn't flash the same number twice
+    const start = effectiveAnchor(grid) + beat * beatLength(grid)
+    const prev = last.current
+    const same = prev !== null && prev.count === count && Math.abs(start - prev.start) < beatLength(grid) / 2
+    if (num && !same) {
+      last.current = { start, count }
       num.textContent = String(count + 1)
       num.classList.toggle('second', count >= 4)
       num.classList.toggle('resting', !(running && isFocused(options.focus, count)))
@@ -109,13 +125,35 @@ export function CountView({ hint, showDrums, showWhole, onMarkOne }: Props) {
       {lane && <DrumLane />}
       {mode === 'file' && showWhole && <SongStrip />}
 
+      {mode === 'listen' && (
+        <p className={'livenote' + (listen.hearing && !listen.doubt ? '' : ' lost')} role="status">
+          <i aria-hidden />
+          {listen.doubt
+            ? "This doesn't sound like the song I'm counting. New song? Find the beat again."
+            : listen.hearing
+              ? 'Listening'
+              : "Can't hear the music. Still counting."}
+        </p>
+      )}
+
       <div className="actions">
-        <button className={'primary' + (running ? ' stop' : '')} onClick={() => engine.toggle()}>
-          {running ? 'Stop' : 'Start'}
-        </button>
+        {mode === 'listen' ? (
+          <button className="primary stop" onClick={onStopListening}>
+            Stop listening
+          </button>
+        ) : (
+          <button className={'primary' + (running ? ' stop' : '')} onClick={() => engine.toggle()}>
+            {running ? 'Stop' : 'Start'}
+          </button>
+        )}
         <button className="txtbtn" onClick={onMarkOne}>
           It's off — tap on the 1
         </button>
+        {mode === 'listen' && (
+          <button className="txtbtn" onClick={onFindAgain}>
+            Find the beat again
+          </button>
+        )}
       </div>
     </div>
   )

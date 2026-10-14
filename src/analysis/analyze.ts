@@ -45,8 +45,17 @@ export function analyze(samples: Float32Array, sampleRate: number): Analysis {
 
   const drums = new Float32Array(frames)
   for (let f = 0; f < frames; f++) drums[f] = 0.65 * onsets.low[f] + 0.35 * onsets.mid[f]
-  const { lag, offset } = correctOctave(findBeatGrid(beatEnv, fps), beatEnv, drums, fps)
-  const downbeat = findDownbeat(bands.low, fps, lag, offset)
+  const shapes = [onsets.low, onsets.mid, onsets.high].map((e) => smooth(e, SHAPE_FRAMES))
+  const first = correctTriplet(findBeatGrid(beatEnv, fps), beatEnv, drums, shapes, fps)
+  const tempoChecked = first.checked
+  let { lag, offset: guess } = correctOctave(first, beatEnv, drums, fps)
+  // nobody counts faster than this: a reading above it is the half-counts of a slower song
+  if ((60 * fps) / lag > MAX_COUNTED_BPM) {
+    lag *= 2
+    guess = bestPhase(beatEnv, lag).offset
+  }
+  const offset = checkPhase(lag, guess, onsets.mid, onsets.high)
+  const { downbeat, margin } = findDownbeat(bands.low, fps, lag, offset)
   const anchorFrame = offset + downbeat * lag
 
   const hits = findHits(bands, onsets)
@@ -59,6 +68,8 @@ export function analyze(samples: Float32Array, sampleRate: number): Analysis {
   return {
     bpm: (60 * fps) / lag,
     anchor: anchorFrame / fps,
+    downbeatMargin: margin,
+    tempoChecked,
     envelope: overview(bands.full, frames),
     hits,
     evidence: evidence.length ? 'In this song ' + evidence.join(', and ') + '.' : '',
@@ -210,6 +221,155 @@ function correctOctave(
   return { lag, offset: bestPhase(beatEnv, lag).offset }
 }
 
+/** Tempos a triplet feel can be mistaken for, as multiples of the beat length. */
+const TRIPLET_RATIOS = [2 / 3, 3 / 4, 4 / 3, 3 / 2]
+/** An alternative tempo has to beat the first reading by this much to replace it. */
+const TRIPLET_MARGIN = 1.15
+
+/**
+ * Hip hop hi-hats often run in threes, and a few seconds of them can make a tempo 3:2 or
+ * 4:3 away from the real one look best (75 or 150 instead of 112). Booms and claps settle
+ * it: on the real tempo they land on the counts, on the wrong one most fall between them.
+ * Halving and doubling aren't tried here — booms land on every count of a half-speed grid
+ * too, so this test can't see those; correctOctave handles them.
+ */
+function correctTriplet(
+  grid: { lag: number; offset: number },
+  beatEnv: Float32Array,
+  drums: Float32Array,
+  shapes: Float32Array[],
+  fps: number,
+): { lag: number; offset: number; checked: boolean } {
+  const minLag = (60 / MAX_BPM) * fps
+  const maxLag = (60 / MIN_BPM) * fps
+  const fits = (l: number) => l >= minLag && l <= maxLag
+
+  // Best test: a song repeats itself every 8 counts. Through a phone or laptop speaker the
+  // booms are mostly gone and the comb test below can't tell 75 from 112, but the 8 still
+  // repeats clearly on the right tempo and not on the wrong one. It's also sharper than
+  // autocorrelation, which sometimes reads 121 for a 112 song, so each candidate is searched
+  // a little either side.
+  const first = bestRepeat(shapes, grid.lag)
+  if (first) {
+    // a half-speed first reading is only replaced when the 8 at twice the speed repeats
+    // clearly better; otherwise halving and doubling are left to correctOctave
+    const double = fits(grid.lag / 2) ? bestRepeat(shapes, grid.lag / 2) : null
+    const base = double && double.score > first.score + REPEAT_MARGIN ? double : first
+    // a drum loop repeats every 4 counts, so 6 and 12 counts repeat as well as 8 do: a
+    // triplet reading has to repeat clearly better, not just as well
+    let pick = base
+    for (const r of TRIPLET_RATIOS) {
+      if (!fits(base.lag * r)) continue
+      const alt = bestRepeat(shapes, base.lag * r)
+      if (alt && alt.score > base.score + REPEAT_MARGIN && alt.score > pick.score) pick = alt
+    }
+    return { lag: pick.lag, offset: bestPhase(beatEnv, pick.lag).offset, checked: true }
+  }
+
+  let best = grid.lag
+  let bestScore = bestPhase(drums, grid.lag).score * TRIPLET_MARGIN
+  for (const r of TRIPLET_RATIOS) {
+    const lag = grid.lag * r
+    if (!fits(lag) || lag * 8 > drums.length) continue
+    const score = bestPhase(drums, lag).score
+    if (score > bestScore) {
+      bestScore = score
+      best = lag
+    }
+  }
+  return best === grid.lag
+    ? { ...grid, checked: false }
+    : { lag: best, offset: bestPhase(beatEnv, best).offset, checked: false }
+}
+
+/** Counts in one 8, the stretch of music a song repeats. */
+const CYCLE = 8
+/** Onsets are smoothed over this many frames each side before comparing whole 8s. */
+const SHAPE_FRAMES = 6
+/** Another tempo's 8 has to repeat this much better (in correlation) to replace the first reading. */
+const REPEAT_MARGIN = 0.08
+
+function smooth(env: Float32Array, k: number): Float32Array {
+  const out = new Float32Array(env.length)
+  let s = 0
+  for (let i = 0; i < Math.min(k, env.length); i++) s += env[i]
+  for (let i = 0; i < env.length; i++) {
+    if (i + k < env.length) s += env[i + k]
+    if (i - k - 1 >= 0) s -= env[i - k - 1]
+    out[i] = s
+  }
+  return out
+}
+
+/** How far either side of a reading to look for the tempo whose 8 repeats best. */
+const REPEAT_SEARCH = 0.08
+const REPEAT_STEP = 0.005
+
+function bestRepeat(shapes: Float32Array[], lag: number): { lag: number; score: number } | null {
+  let best: { lag: number; score: number } | null = null
+  for (let d = -REPEAT_SEARCH; d <= REPEAT_SEARCH + 1e-9; d += REPEAT_STEP) {
+    const l = lag * (1 + d)
+    const score = repeatScore(shapes, l * CYCLE)
+    if (score !== null && (!best || score > best.score)) best = { lag: l, score }
+  }
+  return best
+}
+
+/**
+ * How alike the music is to itself `lag` frames later, -1 to 1, averaged over the bands.
+ * Null when the window is too short to compare more than a little of it.
+ */
+function repeatScore(shapes: Float32Array[], lag: number): number | null {
+  if (shapes[0].length < lag * 1.6) return null
+  let total = 0
+  for (const e of shapes) {
+    let best = -1
+    for (const d of [-1, 0, 1]) {
+      const L = Math.round(lag) + d
+      const n = e.length - L
+      let ma = 0
+      let mb = 0
+      for (let i = 0; i < n; i++) {
+        ma += e[i]
+        mb += e[i + L]
+      }
+      ma /= n
+      mb /= n
+      let sab = 0
+      let saa = 0
+      let sbb = 0
+      for (let i = 0; i < n; i++) {
+        const a = e[i] - ma
+        const b = e[i + L] - mb
+        sab += a * b
+        saa += a * a
+        sbb += b * b
+      }
+      best = Math.max(best, sab / Math.sqrt(saa * sbb + 1e-12))
+    }
+    total += best
+  }
+  return total / shapes.length
+}
+
+/**
+ * Through a small speaker the low end is mostly room boom and bass notes, which can pull the
+ * beats half a count off. Claps and hi-hats are clicks that every speaker plays, so when those
+ * two agree with each other and not with the first guess, they win.
+ */
+function checkPhase(lag: number, offset: number, mid: Float32Array, high: Float32Array): number {
+  const near = (a: number, b: number) => {
+    const d = (((a - b) % lag) + lag) % lag
+    return Math.min(d, lag - d) < lag * 0.12
+  }
+  const m = bestPhase(mid, lag).offset
+  const h = bestPhase(high, lag).offset
+  if (!near(m, h) || near(m, offset)) return offset
+  const upper = new Float32Array(mid.length)
+  for (let f = 0; f < mid.length; f++) upper[f] = 0.65 * mid[f] + 0.35 * high[f]
+  return bestPhase(upper, lag).offset
+}
+
 /** Average onset strength on a comb of beats, allowing each to land a frame early or late. */
 function combScore(env: Float32Array, lag: number, offset: number): number {
   let s = 0
@@ -249,7 +409,7 @@ function bestPhase(env: Float32Array, lag: number): { offset: number; score: num
  * This measures raw low-band energy rather than onset strength — onsets are clipped at 1,
  * and a snare's low end clips just as easily as a kick's, which turned the choice into a tie.
  */
-function findDownbeat(low: Float32Array, fps: number, lag: number, offset: number): number {
+function findDownbeat(low: Float32Array, fps: number, lag: number, offset: number) {
   const span = Math.max(3, Math.round(fps * 0.08))
   const swell = (f: number) => {
     let peak = 0
@@ -258,6 +418,7 @@ function findDownbeat(low: Float32Array, fps: number, lag: number, offset: numbe
   }
   let best = 0
   let bestScore = -1
+  let second = 0
   for (let m = 0; m < 4; m++) {
     let s = 0
     let n = 0
@@ -267,11 +428,14 @@ function findDownbeat(low: Float32Array, fps: number, lag: number, offset: numbe
     }
     const score = n ? s / n : 0
     if (score > bestScore) {
+      second = Math.max(second, bestScore)
       bestScore = score
       best = m
+    } else if (score > second) {
+      second = score
     }
   }
-  return best
+  return { downbeat: best, margin: second > 0 ? bestScore / second : bestScore > 0 ? Infinity : 1 }
 }
 
 /**

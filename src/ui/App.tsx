@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { SongLoadError, loadSong } from '../analysis/loadSong'
 import { CountEngine } from '../engine/CountEngine'
+import { Listener } from '../listen/Listener'
 import {
   deleteSong,
   fileSongId,
@@ -13,11 +14,13 @@ import {
 } from '../library/library'
 import { CountView, type HintKey } from './CountView'
 import { EngineContext } from './hooks'
+import { LessonView } from './LessonView'
+import { ListenView } from './ListenView'
 import { SettingsSheet } from './SettingsSheet'
 import { StartView } from './StartView'
 import { TapView } from './TapView'
 
-type View = 'start' | 'tap' | 'count'
+type View = 'start' | 'listen' | 'tap' | 'count' | 'lesson'
 
 /** The song being counted. `id` is null for a tapped song until it gets a name. */
 interface Current {
@@ -30,8 +33,10 @@ const SAVE_DELAY_MS = 500
 
 type SavedSongInput = Parameters<typeof saveSong>[0]
 
-export function App({ engine = defaultEngine() }: { engine?: CountEngine }) {
+export function App({ engine = defaultEngine(), ...props }: { engine?: CountEngine; listener?: Listener }) {
+  const [listener] = useState(() => props.listener ?? listenerFor(engine))
   const [view, setView] = useState<View>('start')
+  const listenState = useSyncExternalStore(listener.subscribe, listener.getState)
   const [sheetOpen, setSheetOpen] = useState(false)
   const [hint, setHint] = useState<HintKey>('ready')
   const [status, setStatus] = useState('')
@@ -144,6 +149,7 @@ export function App({ engine = defaultEngine() }: { engine?: CountEngine }) {
   }
 
   const onFile = async (file: File) => {
+    listener.stop()
     engine.audio()
     setStatus('Reading ' + file.name + '…')
     const id = fileSongId(file)
@@ -161,6 +167,7 @@ export function App({ engine = defaultEngine() }: { engine?: CountEngine }) {
   }
 
   const onOpenSong = async (song: SavedSong) => {
+    listener.stop()
     engine.audio()
     if (song.kind === 'tap') {
       switchTo({ id: song.id, name: song.name, kind: 'tap' })
@@ -192,7 +199,48 @@ export function App({ engine = defaultEngine() }: { engine?: CountEngine }) {
   }
 
   // ---------- counting ----------
+  const startListening = () => {
+    switchTo(null)
+    setView('listen')
+    void listener.start()
+  }
+  // the microphone found the beat: start showing the count
+  const viewRef = useRef(view)
+  useEffect(() => {
+    viewRef.current = view
+  })
+  useEffect(
+    () =>
+      listener.subscribe(() => {
+        if (viewRef.current === 'listen' && listener.getState().status === 'locked') {
+          setHint('listening')
+          setView('count')
+        }
+      }),
+    [listener],
+  )
+
+  const startLesson = () => {
+    switchTo(null)
+    setView('lesson')
+    void listener.start()
+  }
+
+  // a new song: the count stops until the microphone finds the new beat
+  const findAgain = () => {
+    engine.stop()
+    listener.findAgain()
+    setView('listen')
+  }
+
+  const stopListening = () => {
+    listener.stop()
+    engine.stop()
+    setView('start')
+  }
+
   const startTapMode = () => {
+    listener.stop()
     engine.audio()
     switchTo({ id: null, name: '', kind: 'tap' })
     engine.useTapMode()
@@ -208,8 +256,9 @@ export function App({ engine = defaultEngine() }: { engine?: CountEngine }) {
 
   const onMarkOne = useCallback(() => {
     engine.markOne()
+    if (engine.getState().mode === 'listen') listener.placeOne(engine.getState().grid.anchor)
     setHint('fixed')
-  }, [engine])
+  }, [engine, listener])
 
   const onName = (name: string) => {
     setCurrent((c) => {
@@ -230,6 +279,7 @@ export function App({ engine = defaultEngine() }: { engine?: CountEngine }) {
   }
 
   const onNewSong = () => {
+    listener.stop()
     switchTo(null)
     engine.stop()
     setStatus('')
@@ -245,12 +295,12 @@ export function App({ engine = defaultEngine() }: { engine?: CountEngine }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = (e.target as HTMLElement).tagName
-      if (t === 'INPUT' || t === 'SELECT' || t === 'TEXTAREA' || view === 'start' || sheetOpen) return
+      if (t === 'INPUT' || t === 'SELECT' || t === 'TEXTAREA' || view === 'start' || view === 'listen' || view === 'lesson' || sheetOpen) return
       if (e.code === 'Space') {
         e.preventDefault()
         ;(document.activeElement as HTMLElement | null)?.blur()
         if (view === 'tap') onTap()
-        else engine.toggle()
+        else if (engine.getState().mode !== 'listen') engine.toggle()
       } else if (e.key === 't' || e.key === 'T') {
         e.preventDefault()
         onTap()
@@ -283,7 +333,7 @@ export function App({ engine = defaultEngine() }: { engine?: CountEngine }) {
             Count <em>Me</em> In
           </div>
           <div className="song">{current?.name}</div>
-          {view !== 'start' && (
+          {view !== 'start' && view !== 'listen' && view !== 'lesson' && (
             <button className="txtbtn" onClick={() => setSheetOpen(true)}>
               Settings
             </button>
@@ -296,13 +346,25 @@ export function App({ engine = defaultEngine() }: { engine?: CountEngine }) {
             songs={songs}
             onFile={(f) => void onFile(f)}
             onTapMode={startTapMode}
+            onListen={startListening}
+            onLesson={startLesson}
             onOpenSong={(s) => void onOpenSong(s)}
             onDeleteSong={(s) => void onDeleteSong(s)}
           />
         )}
+        {view === 'listen' && <ListenView listener={listener} onTapInstead={startTapMode} onBack={stopListening} />}
+        {view === 'lesson' && <LessonView listener={listener} onBack={stopListening} />}
         {view === 'tap' && <TapView onTap={onTap} onBack={() => setView(current?.kind === 'file' ? 'count' : 'start')} />}
         {view === 'count' && (
-          <CountView hint={hint} showDrums={showDrums} showWhole={showWhole} onMarkOne={onMarkOne} />
+          <CountView
+            hint={hint}
+            showDrums={showDrums}
+            showWhole={showWhole}
+            listen={listenState}
+            onMarkOne={onMarkOne}
+            onStopListening={stopListening}
+            onFindAgain={findAgain}
+          />
         )}
       </div>
 
@@ -327,4 +389,10 @@ export function App({ engine = defaultEngine() }: { engine?: CountEngine }) {
 let shared: CountEngine | null = null
 function defaultEngine() {
   return (shared ??= new CountEngine())
+}
+const listeners = new WeakMap<CountEngine, Listener>()
+function listenerFor(engine: CountEngine) {
+  let l = listeners.get(engine)
+  if (!l) listeners.set(engine, (l = new Listener(engine)))
+  return l
 }
